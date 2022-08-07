@@ -130,7 +130,7 @@ public class Generate {
     PlanetilerConfig planetilerConfig = PlanetilerConfig.from(arguments);
     String tag = arguments.getString("tag", "openmaptiles tag to use", "v3.13.1");
     String baseUrl = arguments.getString("base-url", "the url used to download the openmaptiles.yml",
-      "https://raw.githubusercontent.com/openmaptiles/openmaptiles/");
+      "https://raw.githubusercontent.com/grinapo/openmaptiles/tracktype/");
     String base = baseUrl + tag + "/";
 
     // start crawling from openmaptiles.yaml
