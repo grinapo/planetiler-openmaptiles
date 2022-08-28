@@ -384,6 +384,9 @@ public class Transportation implements
         .setAttrWithMinzoom(Fields.ACCESS, access(element.access()), 9)
         .setAttrWithMinzoom(Fields.TOLL, element.toll() ? 1 : null, 9)
         .setAttrWithMinzoom(Fields.CYCLEWAY, nullIfEmpty(element.cycleway()), 8)
+        .setAttrWithMinzoom(Fields.CYCLEWAY_LEFT, nullIfEmpty(element.cycleway_left()), 8)
+        .setAttrWithMinzoom(Fields.CYCLEWAY_RIGHT, nullIfEmpty(element.cycleway_right()), 8)
+        .setAttrWithMinzoom(Fields.CYCLEWAY_BOTH, nullIfEmpty(element.cycleway_both()), 8)
         // sometimes z9+, sometimes z12+
         .setAttr(Fields.RAMP, minzoom >= 12 ? rampAboveZ12 :
           ((ZoomFunction<Integer>) z -> z < 9 ? null : z >= 12 ? rampAboveZ12 : rampBelowZ12))
