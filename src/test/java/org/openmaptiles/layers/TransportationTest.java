@@ -724,6 +724,29 @@ class TransportationTest extends AbstractLayerTest {
     ))));
   }
 
+  @Test
+  void testBusGuideway() {
+    assertFeatures(13, List.of(Map.of(
+      "_layer", "transportation",
+      "class", "bus_guideway",
+      "brunnel", "tunnel",
+      "_minzoom", 11
+    ), Map.of(
+      "_layer", "transportation_name",
+      "class", "bus_guideway",
+      "name", "Silver Line",
+      "_minzoom", 12
+    )), process(lineFeature(Map.of(
+      "access", "no",
+      "bus", "yes",
+      "highway", "bus_guideway",
+      "layer", "-1",
+      "name", "Silver Line",
+      "trolley_wire", "yes",
+      "tunnel", "yes"
+    ))));
+  }
+
   final OsmElement.Relation relUS = new OsmElement.Relation(1);
 
   {
@@ -950,13 +973,26 @@ class TransportationTest extends AbstractLayerTest {
   }
 
   @Test
-  void testMergesDisconnectedRoadFeatures() throws GeometryException {
-    testMergesLinestrings(Map.of("class", "motorway"), Transportation.LAYER_NAME, 10, 14);
+  void testMergesDisconnectedRoadNameFeatures() throws GeometryException {
+    testMergesLinestrings(Map.of("class", "motorway"), TransportationName.LAYER_NAME, 10, 14);
   }
 
   @Test
-  void testMergesDisconnectedRoadNameFeatures() throws GeometryException {
-    testMergesLinestrings(Map.of("class", "motorway"), TransportationName.LAYER_NAME, 10, 14);
+  void testMergesDisconnectedRoadFeaturesUnlessOneway() throws GeometryException {
+    String layer = Transportation.LAYER_NAME;
+    testMergesLinestrings(Map.of("class", "motorway", "oneway", 0), layer, 10, 14);
+    testMergesLinestrings(Map.of("class", "motorway"), layer, 10, 14);
+    testDoesNotMergeLinestrings(Map.of("class", "motorway", "oneway", 1), layer, 10, 14);
+    testDoesNotMergeLinestrings(Map.of("class", "motorway", "oneway", -1), layer, 10, 14);
+  }
+
+  @Test
+  void testMergesDisconnectedRoadFeaturesUnlessOnewayLong() throws GeometryException {
+    String layer = Transportation.LAYER_NAME;
+    testMergesLinestrings(Map.of("class", "motorway", "oneway", 0L), layer, 10, 14);
+    testMergesLinestrings(Map.of("class", "motorway"), layer, 10, 14);
+    testDoesNotMergeLinestrings(Map.of("class", "motorway", "oneway", 1L), layer, 10, 14);
+    testDoesNotMergeLinestrings(Map.of("class", "motorway", "oneway", -1L), layer, 10, 14);
   }
 
   @Test
@@ -1243,5 +1279,40 @@ class TransportationTest extends AbstractLayerTest {
       "_layer", "transportation",
       "class", "path"
     )), collector);
+  }
+
+  @Test
+  void testIssue86() {
+    assertFeatures(14, List.of(Map.of(
+      "_layer", "transportation",
+      "class", "bridge",
+      "_minzoom", 13,
+      "_type", "polygon"
+    )), process(closedWayFeature(Map.of(
+      "layer", "1",
+      "man_made", "bridge",
+      "service", "driveway"
+    ))));
+    assertFeatures(14, List.of(Map.of(
+      "_layer", "transportation",
+      "class", "bridge",
+      "_minzoom", 13,
+      "_type", "polygon"
+    )), process(closedWayFeature(Map.of(
+      "layer", "1",
+      "man_made", "bridge",
+      "service", "driveway",
+      "name", "name"
+    ))));
+    assertFeatures(14, List.of(Map.of(
+      "_layer", "transportation",
+      "class", "pier",
+      "_minzoom", 13,
+      "_type", "polygon"
+    )), process(closedWayFeature(Map.of(
+      "layer", "1",
+      "man_made", "pier",
+      "service", "driveway"
+    ))));
   }
 }
