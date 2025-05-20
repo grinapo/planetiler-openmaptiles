@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2021, MapTiler.com & OpenMapTiles contributors.
+Copyright (c) 2024, MapTiler.com & OpenMapTiles contributors.
 All rights reserved.
 
 Code license: BSD 3-Clause License
@@ -42,6 +42,7 @@ import static org.openmaptiles.util.Utils.nullIfEmpty;
 import com.carrotsearch.hppc.LongIntMap;
 import com.onthegomap.planetiler.FeatureCollector;
 import com.onthegomap.planetiler.FeatureMerge;
+import com.onthegomap.planetiler.ForwardingProfile;
 import com.onthegomap.planetiler.VectorTile;
 import com.onthegomap.planetiler.collection.Hppc;
 import com.onthegomap.planetiler.config.PlanetilerConfig;
@@ -53,7 +54,6 @@ import com.onthegomap.planetiler.util.SortKey;
 import com.onthegomap.planetiler.util.Translations;
 import java.util.List;
 import java.util.Locale;
-import org.openmaptiles.OpenMapTilesProfile;
 import org.openmaptiles.generated.OpenMapTilesSchema;
 import org.openmaptiles.generated.Tables;
 import org.openmaptiles.util.OmtLanguageUtils;
@@ -68,17 +68,12 @@ import org.openmaptiles.util.OmtLanguageUtils;
 public class Park implements
   OpenMapTilesSchema.Park,
   Tables.OsmParkPolygon.Handler,
-  OpenMapTilesProfile.FeaturePostProcessor {
-
-  // constants for packing the minimum zoom ordering of park labels into the sort-key field
-  private static final int PARK_NATIONAL_PARK_BOOST = 1 << (SORT_KEY_BITS - 1);
-  private static final int PARK_WIKIPEDIA_BOOST = 1 << (SORT_KEY_BITS - 2);
+  ForwardingProfile.LayerPostProcessor {
 
   // constants for determining the minimum zoom level for a park label based on its area
   private static final double WORLD_AREA_FOR_70K_SQUARE_METERS =
     Math.pow(GeoUtils.metersToPixelAtEquator(0, Math.sqrt(70_000)) / 256d, 2);
   private static final double LOG2 = Math.log(2);
-  private static final int PARK_AREA_RANGE = 1 << (SORT_KEY_BITS - 3);
   private static final double SMALLEST_PARK_WORLD_AREA = Math.pow(4, -26); // 2^14 tiles, 2^12 pixels per tile
 
   private final Translations translations;
@@ -138,7 +133,7 @@ public class Park implements
     // sql filter:    area > 70000*2^(20-zoom_level)
     // simplifies to: zoom_level > 20 - log(area / 70000) / log(2)
     int minzoom = (int) Math.floor(20 - Math.log(area / WORLD_AREA_FOR_70K_SQUARE_METERS) / LOG2);
-    minzoom = Math.min(14, Math.max(5, minzoom));
+    minzoom = Math.clamp(minzoom, 5, 14);
     return minzoom;
   }
 
@@ -149,7 +144,7 @@ public class Park implements
     for (VectorTile.Feature feature : items) {
       if (feature.geometry().geomType() == GeometryType.POINT && feature.hasGroup()) {
         int count = counts.getOrDefault(feature.group(), 0) + 1;
-        feature.attrs().put("rank", count);
+        feature.tags().put("rank", count);
         counts.put(feature.group(), count);
       }
     }

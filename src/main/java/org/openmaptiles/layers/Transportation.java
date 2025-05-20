@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2021, MapTiler.com & OpenMapTiles contributors.
+Copyright (c) 2024, MapTiler.com & OpenMapTiles contributors.
 All rights reserved.
 
 Code license: BSD 3-Clause License
@@ -43,6 +43,7 @@ import static org.openmaptiles.util.Utils.*;
 
 import com.onthegomap.planetiler.FeatureCollector;
 import com.onthegomap.planetiler.FeatureMerge;
+import com.onthegomap.planetiler.ForwardingProfile;
 import com.onthegomap.planetiler.VectorTile;
 import com.onthegomap.planetiler.config.PlanetilerConfig;
 import com.onthegomap.planetiler.expression.MultiExpression;
@@ -62,6 +63,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
@@ -92,8 +94,8 @@ public class Transportation implements
   Tables.OsmShipwayLinestring.Handler,
   Tables.OsmHighwayPolygon.Handler,
   OpenMapTilesProfile.NaturalEarthProcessor,
-  OpenMapTilesProfile.FeaturePostProcessor,
-  OpenMapTilesProfile.OsmRelationPreprocessor,
+  ForwardingProfile.LayerPostProcessor,
+  ForwardingProfile.OsmRelationPreprocessor,
   OpenMapTilesProfile.IgnoreWikidata {
 
   /*
@@ -103,7 +105,8 @@ public class Transportation implements
    */
 
   private static final Logger LOGGER = LoggerFactory.getLogger(Transportation.class);
-  private static final Pattern GREAT_BRITAIN_REF_NETWORK_PATTERN = Pattern.compile("^[AM][0-9AM()]+");
+  private static final Pattern GREAT_BRITAIN_REF_NETWORK_PATTERN = Pattern.compile("^[ABM][0-9ABM()]+");
+  private static final Pattern IRELAND_REF_NETWORK_PATTERN = Pattern.compile("^[MNRL][0-9]+");
   private static final MultiExpression.Index<String> classMapping = FieldMappings.Class.index();
   private static final Set<String> RAILWAY_RAIL_VALUES = Set.of(
     FieldValues.SUBCLASS_RAIL,
@@ -132,10 +135,33 @@ public class Transportation implements
   );
   private static final Set<String> SURFACE_PAVED_VALUES = Set.of(
     "paved", "asphalt", "cobblestone", "concrete", "concrete:lanes", "concrete:plates", "metal",
-    "paving_stones", "sett", "unhewn_cobblestone", "wood"
+    "paving_stones", "sett", "unhewn_cobblestone", "wood", "grade1"
   );
   private static final Set<String> ACCESS_NO_VALUES = Set.of(
     "private", "no"
+  );
+  // ... and also Z4_MOTORWAY_NY_NETWORK, except those in Z5_MOTORWAYS_BY_NETWORK:
+  private static final Set<RouteNetwork> Z5_TRUNK_BY_NETWORK = Set.of(
+    RouteNetwork.CA_TRANSCANADA,
+    RouteNetwork.CA_PROVINCIAL_ARTERIAL,
+    RouteNetwork.US_INTERSTATE,
+    RouteNetwork.US_HIGHWAY,
+    RouteNetwork.GB_MOTORWAY,
+    RouteNetwork.GB_TRUNK,
+    RouteNetwork.IE_MOTORWAY,
+    RouteNetwork.IE_NATIONAL,
+    RouteNetwork.E_ROAD,
+    RouteNetwork.A_ROAD
+  );
+  private static final Set<RouteNetwork> Z5_MOTORWAYS_BY_NETWORK = Set.of(
+    RouteNetwork.GB_TRUNK,
+    RouteNetwork.US_HIGHWAY
+  );
+  private static final Set<String> CA_AB_PRIMARY_AS_ARTERIAL_BY_REF = Set.of(
+    "2", "3", "4"
+  );
+  private static final Set<String> CA_BC_AS_ARTERIAL_BY_REF = Set.of(
+    "3", "5", "99"
   );
   private static final ZoomFunction.MeterToPixelThresholds MIN_LENGTH = ZoomFunction.meterThresholds()
     .put(7, 50)
@@ -150,13 +176,15 @@ public class Transportation implements
     .thenComparingInt(r -> r.ref().length())
     .thenComparing(RouteRelation::ref);
   private static final Set<Integer> ONEWAY_VALUES = Set.of(-1, 1);
+  private final Map<String, Integer> MINZOOMS;
   private static final String LIMIT_MERGE_TAG = "__limit_merge";
   private final AtomicBoolean loggedNoGb = new AtomicBoolean(false);
+  private final AtomicBoolean loggedNoIreland = new AtomicBoolean(false);
   private final boolean z13Paths;
-  private final Map<String, Integer> MINZOOMS;
   private final Stats stats;
   private final PlanetilerConfig config;
   private PreparedGeometry greatBritain = null;
+  private PreparedGeometry ireland = null;
 
   public Transportation(Translations translations, PlanetilerConfig config, Stats stats) {
     this.config = config;
@@ -178,6 +206,8 @@ public class Transportation implements
       entry(FieldValues.CLASS_SECONDARY, 8),
       entry(FieldValues.CLASS_PRIMARY, 6),
       entry(FieldValues.CLASS_BUS_GUIDEWAY, 11),
+      entry(FieldValues.CLASS_SECONDARY, 9),
+      entry(FieldValues.CLASS_PRIMARY, 7),
       entry(FieldValues.CLASS_TRUNK, 5),
       entry(FieldValues.CLASS_MOTORWAY, 4)
     );
@@ -229,6 +259,40 @@ public class Transportation implements
     return "residential".equals(highway) || "unclassified".equals(highway);
   }
 
+  private static boolean isTrunkForZ5(String highway, List<RouteRelation> routeRelations) {
+    // Allow trunk roads that are part of a nation's most important route network to show at z5
+    if (!"trunk".equals(highway)) {
+      return false;
+    }
+    return routeRelations.stream()
+      .map(RouteRelation::networkType)
+      .filter(Objects::nonNull)
+      .anyMatch(Z5_TRUNK_BY_NETWORK::contains);
+  }
+
+  private static boolean isMotorwayWithNetworkForZ4(List<RouteRelation> routeRelations) {
+    // All roads in network included in osm_national_network except gb-trunk and us-highway
+    return routeRelations.stream()
+      .map(RouteRelation::networkType)
+      .filter(Objects::nonNull)
+      .filter(nt -> !Z5_MOTORWAYS_BY_NETWORK.contains(nt))
+      .anyMatch(Z5_TRUNK_BY_NETWORK::contains);
+  }
+
+  private static boolean isMotorwayWoNetworkForZ4(List<RouteRelation> routeRelations) {
+    // All motorways without network (e.g. EU, Asia, South America)
+    return routeRelations.stream()
+      .map(RouteRelation::networkType)
+      .noneMatch(Objects::nonNull);
+  }
+
+  private static boolean isMotorwayForZ4(List<RouteRelation> routeRelations) {
+    if (isMotorwayWoNetworkForZ4(routeRelations)) {
+      return true;
+    }
+    return isMotorwayWithNetworkForZ4(routeRelations);
+  }
+
   private static boolean isDrivewayOrParkingAisle(String service) {
     return FieldValues.SERVICE_PARKING_AISLE.equals(service) || FieldValues.SERVICE_DRIVEWAY.equals(service);
   }
@@ -240,16 +304,32 @@ public class Transportation implements
   @Override
   public void processNaturalEarth(String table, SourceFeature feature,
     FeatureCollector features) {
-    if ("ne_10m_admin_0_countries".equals(table) && feature.hasTag("iso_a2", "GB")) {
-      // multiple threads call this method concurrently, GB polygon *should* only be found
-      // once, but just to be safe synchronize updates to that field
-      synchronized (this) {
-        try {
-          Geometry boundary = feature.polygon().buffer(GeoUtils.metersToPixelAtEquator(0, 10_000) / 256d);
-          greatBritain = PreparedGeometryFactory.prepare(boundary);
-        } catch (GeometryException e) {
-          LOGGER.error("Failed to get Great Britain Polygon: " + e);
+    if (!"ne_10m_admin_0_countries".equals(table)) {
+      return;
+    }
+    // multiple threads call this method concurrently, GB (or IE) polygon *should* only be found
+    // once, but just to be safe synchronize updates to that field
+    if (feature.hasTag("iso_a2", "GB")) {
+      try {
+        var prepared = PreparedGeometryFactory.prepare(
+          feature.polygon().buffer(GeoUtils.metersToPixelAtEquator(0, 10_000) / 256d)
+        );
+        synchronized (this) {
+          greatBritain = prepared;
         }
+      } catch (GeometryException e) {
+        LOGGER.error("Failed to get Great Britain Polygon: " + e);
+      }
+    } else if (feature.hasTag("iso_a2", "IE")) {
+      try {
+        var prepared = PreparedGeometryFactory.prepare(
+          feature.polygon().buffer(GeoUtils.metersToPixelAtEquator(0, 10_000) / 256d)
+        );
+        synchronized (this) {
+          ireland = prepared;
+        }
+      } catch (GeometryException e) {
+        LOGGER.error("Failed to get Ireland Polygon: " + e);
       }
     }
   }
@@ -260,6 +340,9 @@ public class Transportation implements
       RouteNetwork networkType = null;
       String network = relation.getString("network");
       String ref = relation.getString("ref");
+      String name = nullIfEmpty(relation.getString("name"));
+      String colour = coalesce(
+        nullIfEmpty(relation.getString("colour")), nullIfEmpty(relation.getString("ref:colour")));
 
       if ("US:I".equals(network)) {
         networkType = RouteNetwork.US_INTERSTATE;
@@ -269,6 +352,26 @@ public class Transportation implements
         networkType = RouteNetwork.US_STATE;
       } else if (network != null && network.startsWith("CA:transcanada")) {
         networkType = RouteNetwork.CA_TRANSCANADA;
+      } else if ("CA:QC:A".equals(network)) {
+        networkType = RouteNetwork.CA_PROVINCIAL_ARTERIAL;
+      } else if ("CA:ON:primary".equals(network)) {
+        if (ref != null && ref.length() == 3 && ref.startsWith("4")) {
+          networkType = RouteNetwork.CA_PROVINCIAL_ARTERIAL;
+        } else if ("QEW".equals(ref)) {
+          networkType = RouteNetwork.CA_PROVINCIAL_ARTERIAL;
+        } else {
+          networkType = RouteNetwork.CA_PROVINCIAL;
+        }
+      } else if ("CA:MB:PTH".equals(network) && "75".equals(ref)) {
+        networkType = RouteNetwork.CA_PROVINCIAL_ARTERIAL;
+      } else if ("CA:AB:primary".equals(network) && ref != null && CA_AB_PRIMARY_AS_ARTERIAL_BY_REF.contains(ref)) {
+        networkType = RouteNetwork.CA_PROVINCIAL_ARTERIAL;
+      } else if ("CA:BC".equals(network) && ref != null && CA_BC_AS_ARTERIAL_BY_REF.contains(ref)) {
+        networkType = RouteNetwork.CA_PROVINCIAL_ARTERIAL;
+      } else if (network != null && ((network.length() == 5 && network.startsWith("CA:")) ||
+        (network.length() >= 6 && network.startsWith("CA:") && network.charAt(5) == ':'))) {
+        // in SQL: LIKE 'CA:__' OR network LIKE 'CA:__:%'; but wanted to avoid regexp hence more ugly
+        networkType = RouteNetwork.CA_PROVINCIAL;
       }
 
       int rank = switch (coalesce(network, "")) {
@@ -278,7 +381,8 @@ public class Transportation implements
       };
 
       if (network != null || rank < 3) {
-        return List.of(new RouteRelation(coalesce(ref, ""), network, networkType, (byte) rank, relation.id()));
+        return List
+          .of(new RouteRelation(coalesce(ref, ""), network, name, colour, networkType, (byte) rank, relation.id()));
       }
     }
     return null;
@@ -308,16 +412,47 @@ public class Transportation implements
           try {
             Geometry wayGeometry = element.source().worldGeometry();
             if (greatBritain.intersects(wayGeometry)) {
-              Transportation.RouteNetwork networkType =
-                "motorway".equals(element.highway()) ? Transportation.RouteNetwork.GB_MOTORWAY :
-                  Transportation.RouteNetwork.GB_TRUNK;
-              String network = "motorway".equals(element.highway()) ? "omt-gb-motorway" : "omt-gb-trunk";
-              result.add(new RouteRelation(refMatcher.group(), network, networkType, (byte) -1,
-                0));
+              Transportation.RouteNetwork networkType = switch (element.highway()) {
+                case "motorway" -> Transportation.RouteNetwork.GB_MOTORWAY;
+                case "trunk" -> RouteNetwork.GB_TRUNK;
+                case "primary", "secondary" -> RouteNetwork.GB_PRIMARY;
+                default -> null;
+              };
+              result.add(new RouteRelation(refMatcher.group(),
+                networkType == null ? null : networkType.network,
+                null, null,
+                networkType, (byte) -1, 0));
             }
           } catch (GeometryException e) {
             e.log(stats, "omt_transportation_name_gb_test",
               "Unable to test highway against GB route network: " + element.source().id());
+          }
+        }
+      }
+      // Similarly Ireland.
+      refMatcher = IRELAND_REF_NETWORK_PATTERN.matcher(ref);
+      if (refMatcher.find()) {
+        if (ireland == null) {
+          if (!loggedNoIreland.get() && loggedNoIreland.compareAndSet(false, true)) {
+            LOGGER.warn("No IE polygon for inferring route network types");
+          }
+        } else {
+          try {
+            Geometry wayGeometry = element.source().worldGeometry();
+            if (ireland.intersects(wayGeometry)) {
+              String highway = coalesce(element.highway(), "");
+              Transportation.RouteNetwork networkType = switch (highway) {
+                case "motorway" -> Transportation.RouteNetwork.IE_MOTORWAY;
+                case "trunk", "primary" -> RouteNetwork.IE_NATIONAL;
+                default -> RouteNetwork.IE_REGIONAL;
+              };
+              result.add(new RouteRelation(refMatcher.group(),
+                networkType.network, null, null,
+                networkType, (byte) -1, 0));
+            }
+          } catch (GeometryException e) {
+            e.log(stats, "omt_transportation_name_ie_test",
+              "Unable to test highway against IE route network: " + element.source().id());
           }
         }
       }
@@ -328,7 +463,7 @@ public class Transportation implements
 
   RouteRelation getRouteRelation(Tables.OsmHighwayLinestring element) {
     List<RouteRelation> all = getRouteRelations(element);
-    return all.isEmpty() ? null : all.get(0);
+    return all.isEmpty() ? null : all.getFirst();
   }
 
   @Override
@@ -358,16 +493,18 @@ public class Transportation implements
       Integer rampAboveZ12 = (highwayRamp || element.isRamp()) ? 1 : null;
       Integer rampBelowZ12 = highwayRamp ? 1 : null;
 
+      boolean expressway = element.expressway() && !"motorway".equals(highway) && !(element.isRamp() || highwayRamp);
+
       FeatureCollector.Feature feature = features.line(LAYER_NAME).setBufferPixels(BUFFER_SIZE)
         // main attributes at all zoom levels (used for grouping <= z8)
         .setAttr(Fields.CLASS, highwayClass)
         .setAttr(Fields.SUBCLASS, highwaySubclass(highwayClass, element.publicTransport(), highway))
-        .setAttr(Fields.BRUNNEL, brunnel(element.isBridge(), element.isTunnel(), element.isFord()))
         .setAttr(Fields.NETWORK, networkType != null ? networkType.name : null)
+        .setAttrWithMinSize(Fields.BRUNNEL, brunnel(element.isBridge(), element.isTunnel(), element.isFord()), 4, 4, 12)
         // z8+
-        .setAttrWithMinzoom(Fields.EXPRESSWAY, element.expressway() && !"motorway".equals(highway) ? 1 : null, 8)
+        .setAttrWithMinzoom(Fields.EXPRESSWAY, expressway ? 1 : null, 8)
         // z9+
-        .setAttrWithMinzoom(Fields.LAYER, nullIfLong(element.layer(), 0), 9)
+        .setAttrWithMinSize(Fields.LAYER, nullIfLong(element.layer(), 0), 4, 9, 12)
         .setAttrWithMinzoom(Fields.BICYCLE, nullIfEmpty(element.bicycle()), 9)
         .setAttrWithMinzoom(Fields.FOOT, nullIfEmpty(element.foot()), 9)
         .setAttrWithMinzoom(Fields.HORSE, nullIfEmpty(element.horse()), 9)
@@ -384,8 +521,8 @@ public class Transportation implements
         // z12+
         .setAttrWithMinzoom(Fields.SERVICE, service, 12)
         .setAttrWithMinzoom(Fields.ONEWAY, nullIfInt(element.isOneway(), 0), 12)
-        .setAttrWithMinzoom(Fields.SURFACE, surface(element.surface()), 9)			// -g
-        .setAttrWithMinzoom(Fields.TRACKTYPE, nullIfEmpty(element.tracktype()), 9)		// -g
+        .setAttrWithMinzoom(Fields.SURFACE, surface(coalesce(element.surface(), element.tracktype())), 9)	// -g
+        .setAttrWithMinzoom(Fields.TRACKTYPE, nullIfEmpty(element.tracktype()), 9)				// -g
         .setMinPixelSize(0) // merge during post-processing, then limit by size
         .setSortKey(element.zOrder())
         .setMinZoom(minzoom);
@@ -407,6 +544,7 @@ public class Transportation implements
       }
     }
     String highway = element.highway();
+    String construction = element.construction();
 
     int minzoom;
     if ("pier".equals(element.manMade())) {
@@ -419,11 +557,23 @@ public class Transportation implements
         case FieldValues.CLASS_SERVICE -> isDrivewayOrParkingAisle(service(element.service())) ? 14 : 13;
         case FieldValues.CLASS_TRACK, FieldValues.CLASS_PATH -> routeRank == 1 ? 12 :
           (z13Paths || !nullOrEmpty(element.name()) || routeRank <= 2 || !nullOrEmpty(element.sacScale())) ? 9 : 10; // path zoom hax -g
+        case FieldValues.CLASS_TRUNK -> {
+          boolean z5trunk = isTrunkForZ5(highway, routeRelations);
+          // and if it is good for Z5, it may be good also for Z4 (see CLASS_MOTORWAY bellow):
+          String clazz = FieldValues.CLASS_TRUNK;
+          if (z5trunk && isMotorwayWithNetworkForZ4(routeRelations)) {
+            clazz = FieldValues.CLASS_MOTORWAY;
+            z5trunk = false;
+          }
+          yield (z5trunk) ? 5 : MINZOOMS.getOrDefault(clazz, Integer.MAX_VALUE);
+        }
+        case FieldValues.CLASS_MOTORWAY -> isMotorwayForZ4(routeRelations) ?
+          MINZOOMS.getOrDefault(FieldValues.CLASS_MOTORWAY, Integer.MAX_VALUE) : 5;
         default -> MINZOOMS.getOrDefault(baseClass, Integer.MAX_VALUE);
       };
     }
 
-    if (isLink(highway)) {
+    if (isLink(highway) || isLink(construction)) {
       minzoom = Math.max(minzoom, 9);
     }
     return minzoom;
@@ -467,7 +617,6 @@ public class Transportation implements
         .setAttr(Fields.CLASS, clazz)
         .setAttr(Fields.SUBCLASS, railway)
         .setAttr(Fields.SERVICE, service(service))
-        .setAttr(Fields.ONEWAY, nullIfInt(element.isOneway(), 0))
         .setAttr(Fields.RAMP, element.isRamp() ? 1L : null)
         .setAttrWithMinzoom(Fields.BRUNNEL, brunnel(element.isBridge(), element.isTunnel(), element.isFord()), 10)
         .setAttrWithMinzoom(Fields.LAYER, nullIfLong(element.layer(), 0), 9)
@@ -498,13 +647,13 @@ public class Transportation implements
       .setAttr(Fields.CLASS, element.shipway()) // "ferry"
       // no subclass
       .setAttr(Fields.SERVICE, service(element.service()))
-      .setAttr(Fields.ONEWAY, nullIfInt(element.isOneway(), 0))
       .setAttr(Fields.RAMP, element.isRamp() ? 1L : null)
       .setAttr(Fields.BRUNNEL, brunnel(element.isBridge(), element.isTunnel(), element.isFord()))
       .setAttr(Fields.LAYER, nullIfLong(element.layer(), 0))
       .setSortKey(element.zOrder())
       .setMinPixelSize(0) // merge during post-processing, then limit by size
-      .setMinZoom(11);
+      .setMinZoom(4)
+      .setMinPixelSizeBelowZoom(10, 32); // `sql_filter: ST_Length(...)` used in OpenMapTiles translates to 32px
   }
 
   @Override
@@ -536,33 +685,43 @@ public class Transportation implements
     // TODO merge preserving oneway instead ignoring
     int onewayId = 1;
     for (var item : items) {
-      var oneway = item.attrs().get(Fields.ONEWAY);
+      var oneway = item.tags().get(Fields.ONEWAY);
       if (oneway instanceof Number n && ONEWAY_VALUES.contains(n.intValue())) {
-        item.attrs().put(LIMIT_MERGE_TAG, onewayId++);
+        item.tags().put(LIMIT_MERGE_TAG, onewayId++);
       }
     }
 
     var merged = FeatureMerge.mergeLineStrings(items, minLength, tolerance, BUFFER_SIZE);
 
     for (var item : merged) {
-      item.attrs().remove(LIMIT_MERGE_TAG);
+      item.tags().remove(LIMIT_MERGE_TAG);
     }
     return merged;
   }
 
   enum RouteNetwork {
 
-    US_INTERSTATE("us-interstate"),
-    US_HIGHWAY("us-highway"),
-    US_STATE("us-state"),
-    CA_TRANSCANADA("ca-transcanada"),
-    GB_MOTORWAY("gb-motorway"),
-    GB_TRUNK("gb-trunk");
+    US_INTERSTATE("us-interstate", null),
+    US_HIGHWAY("us-highway", null),
+    US_STATE("us-state", null),
+    CA_TRANSCANADA("ca-transcanada", null),
+    CA_PROVINCIAL_ARTERIAL("ca-provincial-arterial", null),
+    CA_PROVINCIAL("ca-provincial", null),
+    GB_MOTORWAY("gb-motorway", "omt-gb-motorway"),
+    GB_TRUNK("gb-trunk", "omt-gb-trunk"),
+    GB_PRIMARY("gb-primary", "omt-gb-primary"),
+    IE_MOTORWAY("ie-motorway", "omt-ie-motorway"),
+    IE_NATIONAL("ie-national", "omt-ie-national"),
+    IE_REGIONAL("ie-regional", "omt-ie-regional"),
+    E_ROAD("e-road", null),
+    A_ROAD("a-road", null);
 
     final String name;
+    final String network;
 
-    RouteNetwork(String name) {
+    RouteNetwork(String name, String network) {
       this.name = name;
+      this.network = network;
     }
   }
 
@@ -570,6 +729,8 @@ public class Transportation implements
   record RouteRelation(
     String ref,
     String network,
+    String name,
+    String colour,
     RouteNetwork networkType,
     byte rank,
     @Override long id
@@ -581,6 +742,8 @@ public class Transportation implements
         MemoryEstimator.estimateSize(rank) +
         POINTER_BYTES + estimateSize(ref) +
         POINTER_BYTES + estimateSize(network) +
+        POINTER_BYTES + estimateSize(name) +
+        POINTER_BYTES + estimateSize(colour) +
         POINTER_BYTES + // networkType
         MemoryEstimator.estimateSizeLong(id);
     }
